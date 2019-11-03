@@ -14,6 +14,8 @@ import numpy as np
 
 # local modules
 from data import LSVRC2010
+from imagenet_data.datagenerator import ImageDataGenerator
+from tensorflow.data import Iterator
 import logs
 
 class AlexNet:
@@ -22,17 +24,47 @@ class AlexNet:
     `AlexNet <https://papers.nips.cc/paper/4824-imagenet-classification-with-deep-convolutional-neural-networks.pdf>`_
     """
 
-    def __init__(self, path, batch_size, resume):
+    def __init__(self, path, batch_size, resume,
+                 num_classes=1000,
+                 train_file='imagenet_data/train_imgs.txt',
+                 val_file='imagenet_data/val_imgs.txt'):
         """
         Build the AlexNet model
         """
         self.logger = logs.get_logger()
 
         self.resume = resume
-        self.path = path
+        # self.path = path
         self.batch_size = batch_size
-        self.lsvrc2010 = LSVRC2010(self.path, batch_size)
-        self.num_classes = len(self.lsvrc2010.wnid2label)
+        self.num_classes = num_classes
+
+        # ----------- data generator initialization -------------
+        tr_data = ImageDataGenerator(train_file,
+                                     mode='training',
+                                     batch_size=batch_size,
+                                     num_classes=num_classes,
+                                     shuffle=True)
+        val_data = ImageDataGenerator(val_file,
+                                      mode='inference',
+                                      batch_size=batch_size,
+                                      num_classes=num_classes,
+                                      shuffle=True)
+
+        # train iterator
+        self.train_batches_per_epoch = int(np.floor(tr_data.data_size / batch_size))
+        train_iterator = Iterator.from_structure(tr_data.data.output_types,
+                                           tr_data.data.output_shapes)
+        self.next_batch_train = train_iterator.get_next()
+        self.training_init_op = train_iterator.make_initializer(tr_data.data)
+
+        # val iterator
+        self.val_batches_per_epoch = int(np.floor(val_data.data_size / batch_size))
+        val_iterator = Iterator.from_structure(val_data.data.output_types,
+                                               val_data.data.output_shapes)
+        self.next_batch_val = val_iterator.get_next()
+        self.validation_init_op = val_iterator.make_initializer(val_data.data)
+
+        # ----------- End of data generator initialization -----------
 
         self.lr = 0.001
         self.momentum = 0.9
@@ -289,17 +321,19 @@ class AlexNet:
 
         self.merged = tf.summary.merge_all()
 
-    def save_model(self, sess, saver):
+    def save_model(self, sess, saver, model_dir='model', model_name='model.ckpt'):
         """
         Save the current model
 
         :param sess: Session object
         :param saver: Saver object responsible to store
+        :param model_dir: directory for saving model
+        :param model_name: name for saving model
         """
-        model_base_path = os.path.join(os.getcwd(), 'model')
+        model_base_path = os.path.join(os.getcwd(), model_dir)
         if not os.path.exists(model_base_path):
             os.mkdir(model_base_path)
-        model_save_path = os.path.join(os.getcwd(), 'model', 'model.ckpt')
+        model_save_path = os.path.join(os.getcwd(), model_dir, model_name)
         save_path = saver.save(sess, model_save_path)
         self.logger.info("Model saved in path: %s", save_path)
 
@@ -335,7 +369,7 @@ class AlexNet:
                                                    'summary', 'val'),
                                       sess.graph))
 
-    def train(self, epochs, thread='false'):
+    def train(self, epochs, thread='false', num_save_model_segments=10):
         """
         Train AlexNet.
         """
@@ -346,7 +380,13 @@ class AlexNet:
 
         init = tf.global_variables_initializer()
 
-        saver = tf.train.Saver()
+        num_save_model_segments = num_save_model_segments
+        saver = tf.train.Saver(
+            max_to_keep=num_save_model_segments + 2)  # latest, and permanently save (# segments + 1) models
+        perm_save_epochs = np.linspace(0, epochs, num_save_model_segments + 1).astype(int)
+
+        # saver = tf.train.Saver()
+
         with tf.Session(config=tf.ConfigProto(log_device_placement=True)) as sess:
             (summary_writer_train,
              summary_writer_val) = self.get_summary_writer(sess)
@@ -359,6 +399,14 @@ class AlexNet:
             resume_batch = True
             best_loss = float('inf')
             while sess.run(self.cur_epoch) < epochs:
+
+                # check if the current model is among the permanently saved ones
+                cur_epoch = int(sess.run(self.cur_epoch))
+                if cur_epoch in perm_save_epochs:
+                    self.save_model(sess, saver,
+                                    model_dir='model/permanent',
+                                    model_name='epoch_{}.ckpt'.format(cur_epoch))
+
                 losses = []
                 accuracies = []
 
@@ -368,14 +416,18 @@ class AlexNet:
                     sess.run(self.init_batch_op)
                 resume_batch = False
                 start = time.time()
-                gen_batch = self.lsvrc2010.gen_batch
-                for images, labels in gen_batch:
-                    batch_i = sess.run(self.cur_batch)
+
+                # initialize the iterator to iterate over training
+                sess.run(self.training_init_op)
+                sess.run(self.validation_init_op)
+                for batch_i in range(self.train_batches_per_epoch):
+                    # get batch data
+                    images, labels = sess.run(self.next_batch_train)
+
                     # If it's resumed from stored model,
                     # this will save from messing up the batch number
                     # in subsequent epoch
-                    if batch_i >= ceil(len(self.lsvrc2010.image_names) / self.batch_size):
-                        break
+
                     (_, global_step,
                      _) = sess.run([self.optimizer,
                                     self.global_step, self.increment_batch_op],
@@ -423,7 +475,7 @@ class AlexNet:
                         start = time.time()
 
                     if batch_i % val_step == 0:
-                        images_val, labels_val = self.lsvrc2010.get_batch_val
+                        images_val, labels_val = sess.run(self.next_batch_val)
                         (summary, acc, top5_acc,
                          loss) = sess.run([self.merged,
                                            self.accuracy,
@@ -461,9 +513,11 @@ class AlexNet:
         with tf.Session(config=tf.ConfigProto(log_device_placement=True)) as sess:
             self.restore_model(sess, saver)
 
+            sess.run(self.validation_init_op)
             start = time.time()
-            batch = self.lsvrc2010.gen_batch_test
-            for i, (patches, labels) in enumerate(batch):
+
+            for i in range(self.val_batches_per_epoch):
+                patches, labels = sess.run(self.next_batch_val)
                 count += patches[0].shape[0]
                 avg_logits = np.zeros((patches[0].shape[0], self.num_classes))
                 for patch in patches:
@@ -493,11 +547,12 @@ class AlexNet:
                                   top1_count / count,
                                   top5_count / count)
 
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('image_path', metavar = 'image-path',
-                        help = 'ImageNet dataset path')
+    # parser.add_argument('image_path', metavar = 'image-path',
+    #                     help = 'ImageNet dataset path')
     parser.add_argument('--resume', metavar='resume',
                         type=lambda x: x != 'False', default=True,
                         required=False,
@@ -506,8 +561,10 @@ if __name__ == '__main__':
     parser.add_argument('--test', help='Test AlexNet')
     args = parser.parse_args()
 
-    alexnet = AlexNet(args.image_path, batch_size=128, resume=args.resume)
+    alexnet = AlexNet(None, batch_size=128, resume=args.resume)
 
+    print("\nargs.train =", args.train)
+    print("args.resume={}\n".format(args.resume))
     if args.train == 'true':
         alexnet.train(50)
     elif args.test == 'true':
