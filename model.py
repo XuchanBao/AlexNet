@@ -332,7 +332,7 @@ class AlexNet:
         """
         model_base_path = os.path.join(os.getcwd(), model_dir)
         if not os.path.exists(model_base_path):
-            os.mkdir(model_base_path)
+            os.makedirs(model_base_path, exist_ok=True)
         model_save_path = os.path.join(os.getcwd(), model_dir, model_name)
         save_path = saver.save(sess, model_save_path)
         self.logger.info("Model saved in path: %s", save_path)
