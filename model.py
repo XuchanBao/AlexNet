@@ -337,15 +337,14 @@ class AlexNet:
         save_path = saver.save(sess, model_save_path)
         self.logger.info("Model saved in path: %s", save_path)
 
-    def restore_model(self, sess, saver):
+    def restore_model(self, sess, saver, model_dir='model', model_name='model.ckpt'):
         """
         Restore previously saved model
 
         :param sess: Session object
         :param saver: Saver object responsible to store
         """
-        model_base_path = os.path.join(os.getcwd(), 'model')
-        model_restore_path = os.path.join(os.getcwd(), 'model', 'model.ckpt')
+        model_restore_path = os.path.join(os.getcwd(), model_dir, model_name)
         saver.restore(sess, model_restore_path)
         self.logger.info("Model Restored from path: %s",
                          model_restore_path)
